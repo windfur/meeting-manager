@@ -184,6 +184,7 @@ def _get_duration(ffmpeg, file_path):
     ]
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=30,
+        encoding='utf-8', errors='replace',
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
     )
     # ffmpeg 把資訊輸出到 stderr
@@ -213,6 +214,7 @@ def _ffmpeg_extract(ffmpeg, input_path, output_path, start_sec, duration_sec):
     ]
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=120,
+        encoding='utf-8', errors='replace',
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
     )
     if result.returncode != 0:

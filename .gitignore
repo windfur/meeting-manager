@@ -5,3 +5,4 @@ venv/
 .db_config.json
 output/
 feedback_log.jsonl
+summary_style.md

@@ -13,7 +13,7 @@ DB_CONFIG_FILE = BASE_DIR / ".db_config.json"
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
-LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4.1-mini")
 
 # Notion
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
@@ -21,6 +21,9 @@ NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID", "")
 
 # Audio
 MAX_AUDIO_SIZE_MB = 25
+
+# Summary style
+SUMMARY_STYLE_FILE = BASE_DIR / "summary_style.md"
 
 
 def get_db_id():

@@ -59,6 +59,9 @@ def main():
 
     st.caption(f"🤖 摘要模型：`{config.LLM_MODEL}`（可在 .env 切換）")
 
+    # --- Sidebar: 摘要偏好設定 ---
+    _show_style_settings()
+
     # --- Step 1: 轉錄按鈕 ---
     can_start = uploaded_file is not None and bool(meeting_name)
     if st.button("🚀 開始轉錄", type="primary", disabled=not can_start):
@@ -99,6 +102,118 @@ def _check_config():
         st.error("⚠️ 設定不完整，請編輯 `.env` 檔案：\n" + "\n".join(f"- {i}" for i in issues))
         return False
     return True
+
+
+# ──────────────────────────────────────────────
+# Sidebar: 摘要偏好設定
+# ──────────────────────────────────────────────
+
+def _show_style_settings():
+    style_file = config.SUMMARY_STYLE_FILE
+
+    # 結構化規範範本 — 使用者按一鍵就能得到骨架，照著改就好
+    STYLE_TEMPLATE = """# 摘要規範
+
+## 語言規則
+- 用繁體中文撰寫
+- 技術術語保留英文（API、MQTT、TTL 等）
+- 標題可中英混用
+
+## 領域知識
+<!-- 寫下你的團隊背景、常見術語、人名對照等，AI 會參考 -->
+- 我們是 [團隊名稱]，負責 [業務範圍]
+- 常見縮寫：[例如 PM = Product Manager]
+
+## 寫作原則
+- 不要編造逐字稿中沒有的資訊
+- 不要省略技術細節、數字、參數
+- 被放棄的方案也要記錄（說明為什麼放棄）
+- 寧可寫長一點也不要遺漏重要資訊
+- 30 分鐘以上的會議通常有 4-10 個主題
+
+## 結論標記準則
+- ✅ 被採納：有明確拍板語句
+- ❌ 被放棄：有明確否決或轉向
+- ⏳ 待確認：需要等其他人/事才能決定
+
+## 主題拆分
+- 只要有獨立的討論脈絡（提出 → 回應 → 結論），就拆成獨立主題
+- 背景說明獨立成段
+- 寧可多拆不要少拆
+
+## 輸出格式
+
+### 會議紀錄：[一句話概括]
+
+#### 一、背景與問題
+簡要說明會議起因、核心問題。
+
+#### 二、討論內容
+
+**Case [編號]：[標題]**
+- **情境描述：** ...
+- **討論要點：**
+  - 用多層次結構，不要全部攤平
+  - **方案 A** — 說明
+    - 優點
+    - 疑慮
+- **結論：** ✅ / ⏳ / ❌ + 具體說明
+
+#### 三、會議總結
+
+**✅ 已確認的決議 / Action Items：**
+- [具體可執行的項目]
+
+**⏳ 待確認項目：**
+- [待誰確認、確認什麼]
+
+**❌ 被否決 / 放棄的方案：**
+- [方案名稱] — 原因
+""".strip()
+
+    with st.sidebar:
+        st.header("⚙️ 摘要規範設定")
+        st.caption("定義 AI 產生摘要的規範，下次產生摘要時自動套用。")
+
+        # 讀取現有內容
+        current = ""
+        if style_file.exists():
+            current = style_file.read_text(encoding='utf-8').strip()
+
+        # 產生範本按鈕（只在編輯器為空時顯示）
+        if not current:
+            if st.button("📋 產生規範範本", use_container_width=True,
+                         help="一鍵填入結構化範本，你只需要修改內容"):
+                st.session_state['style_editor'] = STYLE_TEMPLATE
+                st.rerun()
+
+        edited = st.text_area(
+            "摘要規範",
+            value=current,
+            height=350,
+            placeholder="點擊上方「📋 產生規範範本」開始，\n或直接寫你的摘要規範。\n\n建議包含：語言規則、領域知識、寫作原則、\n結論標記準則、主題拆分、輸出格式。",
+            key="style_editor",
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("💾 儲存", use_container_width=True):
+                style_file.write_text(edited, encoding='utf-8')
+                st.toast("✅ 摘要規範已儲存！")
+                st.rerun()
+        with col2:
+            if st.button("🗑️ 清除", use_container_width=True):
+                if style_file.exists():
+                    style_file.unlink()
+                if 'style_editor' in st.session_state:
+                    del st.session_state['style_editor']
+                st.success("已清除！")
+                st.rerun()
+
+        if edited.strip():
+            st.info("✅ 規範已啟用，下次產生摘要時會套用。")
+        else:
+            st.caption("目前使用預設摘要規範。")
 
 
 # ──────────────────────────────────────────────
@@ -288,6 +403,11 @@ def _do_summarize():
         # 如果使用者沒有手動填標籤，就用 AI 自動產生的
         if not st.session_state.tags and auto_tags:
             st.session_state.tags = auto_tags
+
+        # 清除 widget cache，讓編輯器顯示新的摘要內容
+        for wkey in ['summary_editor', 'key_points_editor']:
+            if wkey in st.session_state:
+                del st.session_state[wkey]
 
         output_dir = Path(st.session_state.output_dir)
         (output_dir / "summary_draft.md").write_text(summary, encoding='utf-8')
