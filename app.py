@@ -175,6 +175,10 @@ def _show_style_settings():
         st.header("⚙️ 摘要規範設定")
         st.caption("定義 AI 產生摘要的規範，下次產生摘要時自動套用。")
 
+        # 版本號：變更時 +1 強制 widget 重建
+        if 'style_version' not in st.session_state:
+            st.session_state.style_version = 0
+
         # 讀取現有內容
         current = ""
         if style_file.exists():
@@ -184,30 +188,32 @@ def _show_style_settings():
         if not current:
             if st.button("📋 產生規範範本", use_container_width=True,
                          help="一鍵填入結構化範本，你只需要修改內容"):
-                st.session_state['style_editor'] = STYLE_TEMPLATE
+                style_file.write_text(STYLE_TEMPLATE, encoding='utf-8')
+                st.session_state.style_version += 1
                 st.rerun()
 
+        style_key = f"style_editor_v{st.session_state.style_version}"
         edited = st.text_area(
             "摘要規範",
             value=current,
             height=350,
             placeholder="點擊上方「📋 產生規範範本」開始，\n或直接寫你的摘要規範。\n\n建議包含：語言規則、領域知識、寫作原則、\n結論標記準則、主題拆分、輸出格式。",
-            key="style_editor",
+            key=style_key,
         )
 
         col1, col2 = st.columns(2)
         with col1:
             if st.button("💾 儲存", use_container_width=True):
                 style_file.write_text(edited, encoding='utf-8')
+                st.session_state.style_version += 1
                 st.toast("✅ 摘要規範已儲存！")
                 st.rerun()
         with col2:
             if st.button("🗑️ 清除", use_container_width=True):
                 if style_file.exists():
                     style_file.unlink()
-                if 'style_editor' in st.session_state:
-                    del st.session_state['style_editor']
-                st.success("已清除！")
+                st.session_state.style_version += 1
+                st.toast("已清除！")
                 st.rerun()
 
         if edited.strip():
@@ -498,16 +504,22 @@ def _upload_to_notion(final_summary, final_key_points):
     output_dir = Path(st.session_state.output_dir)
 
     try:
-        with st.spinner("上傳至 Notion 中..."):
+        with st.status("上傳至 Notion 中...", expanded=True) as status:
+            status.update(label="儲存本地備份...", state="running")
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "summary.md").write_text(final_summary, encoding='utf-8')
             _save_feedback(output_dir, final_summary, final_key_points)
 
+            status.update(label="連線 Notion 資料庫...", state="running")
             db_id = ensure_database()
             transcript_to_upload = (
                 st.session_state.confirmed_transcript
                 or st.session_state.raw_transcript
             )
+
+            def _progress(msg):
+                status.update(label=msg, state="running")
+
             page_url = upload_meeting(
                 db_id,
                 st.session_state.meeting_name,
@@ -516,9 +528,11 @@ def _upload_to_notion(final_summary, final_key_points):
                 final_summary,
                 transcript_to_upload,
                 key_points=final_key_points,
+                progress_callback=_progress,
             )
             st.session_state.page_url = page_url
             st.session_state.step = 3
+            status.update(label="上傳完成！", state="complete")
             st.rerun()
     except Exception as e:
         st.error(f"上傳失敗：{str(e)}")

@@ -125,7 +125,7 @@ def upload_meeting(db_id, meeting_name, date_str, tags, summary_md, transcript_t
 
     # 補上傳超過 98 個的摘要 blocks（極長摘要才會觸發）
     if len(summary_blocks) > 98:
-        _append_blocks_batched(page_id, summary_blocks[98:])
+        _append_blocks_batched(page_id, summary_blocks[98:], progress_callback=progress_callback)
 
     # 補上傳超過 100 個的逐字稿 blocks 到 toggle 裡
     if len(transcript_blocks) > 100:
@@ -140,16 +140,19 @@ def upload_meeting(db_id, meeting_name, date_str, tags, summary_md, transcript_t
                     toggle_id = block["id"]
                     break
         if toggle_id:
-            _append_blocks_batched(toggle_id, transcript_blocks[100:])
+            _append_blocks_batched(toggle_id, transcript_blocks[100:], progress_callback=progress_callback)
 
     return page_url
 
 
 # --- 內部函式 ---
 
-def _append_blocks_batched(page_id, blocks, batch_size=100):
+def _append_blocks_batched(page_id, blocks, batch_size=100, progress_callback=None):
     """分批附加 blocks（Notion 每次最多 100 個）。"""
-    for i in range(0, len(blocks), batch_size):
+    total = (len(blocks) + batch_size - 1) // batch_size
+    for idx, i in enumerate(range(0, len(blocks), batch_size), 1):
+        if progress_callback:
+            progress_callback(f"分批上傳中... ({idx}/{total})")
         batch = blocks[i:i + batch_size]
         _api_patch(f"/blocks/{page_id}/children", {"children": batch})
 
