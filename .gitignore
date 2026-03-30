@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 venv/
 .db_config.json
+.notion_tokens.json
 output/
 feedback_log.jsonl
 summary_style.md

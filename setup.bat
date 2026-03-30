@@ -8,22 +8,13 @@ echo.
 :: 檢查 Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo ⚠️  找不到 Python，嘗試自動安裝...
-    winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements
-    if errorlevel 1 (
-        echo ❌ 自動安裝失敗！請手動安裝：
-        echo    https://www.python.org/downloads/
-        echo    安裝時務必勾選「Add Python to PATH」
-        echo.
-        pause
-        exit /b 1
-    )
-    echo.
-    echo ✅ Python 已安裝，但 PATH 尚未生效
-    echo    請關閉這個視窗，重新開啟後再執行一次 setup.bat
+    echo ❌ 找不到 Python！請先安裝：
+    echo    https://www.python.org/downloads/
+    echo    安裝時務必勾選「Add Python to PATH」
+    echo    裝好後重新執行 setup.bat
     echo.
     pause
-    exit /b 0
+    exit /b 1
 )
 
 echo ✅ Python 已安裝

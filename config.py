@@ -8,7 +8,6 @@ load_dotenv()
 # Base paths
 BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "output"
-DB_CONFIG_FILE = BASE_DIR / ".db_config.json"
 
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -18,6 +17,7 @@ LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4.1-mini")
 # Notion
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
 NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID", "")
+NOTION_TOKENS_FILE = BASE_DIR / ".notion_tokens.json"
 
 # Audio
 MAX_AUDIO_SIZE_MB = 25
@@ -26,17 +26,53 @@ MAX_AUDIO_SIZE_MB = 25
 SUMMARY_STYLE_FILE = BASE_DIR / "summary_style.md"
 
 
-def get_db_id():
-    if DB_CONFIG_FILE.exists():
+# ── Notion 多帳號管理 ──
+
+def load_notion_tokens():
+    """載入所有已儲存的 Notion tokens，回傳 [{label, token}]。"""
+    tokens = []
+    # .env 的 token 當作預設
+    if NOTION_TOKEN:
+        tokens.append({"label": "預設（.env）", "token": NOTION_TOKEN})
+    # 額外儲存的 tokens
+    if NOTION_TOKENS_FILE.exists():
         try:
-            with open(DB_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("database_id")
+            with open(NOTION_TOKENS_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                for item in saved:
+                    # 避免跟 .env 的重複
+                    if item.get("token") != NOTION_TOKEN:
+                        tokens.append(item)
         except (json.JSONDecodeError, KeyError):
-            return None
-    return None
+            pass
+    return tokens
 
 
-def save_db_id(db_id):
-    with open(DB_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"database_id": db_id}, f)
+def save_notion_token(label, token):
+    """新增一組 Notion token。"""
+    saved = []
+    if NOTION_TOKENS_FILE.exists():
+        try:
+            with open(NOTION_TOKENS_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+        except (json.JSONDecodeError, KeyError):
+            pass
+    # 避免重複
+    saved = [t for t in saved if t.get("token") != token]
+    saved.append({"label": label, "token": token})
+    with open(NOTION_TOKENS_FILE, "w", encoding="utf-8") as f:
+        json.dump(saved, f, ensure_ascii=False, indent=2)
+
+
+def remove_notion_token(token):
+    """移除一組 Notion token。"""
+    if not NOTION_TOKENS_FILE.exists():
+        return
+    try:
+        with open(NOTION_TOKENS_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        saved = [t for t in saved if t.get("token") != token]
+        with open(NOTION_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(saved, f, ensure_ascii=False, indent=2)
+    except (json.JSONDecodeError, KeyError):
+        pass

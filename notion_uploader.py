@@ -5,10 +5,23 @@ import config
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
+# 當前使用的 token（可由 app.py 動態切換）
+_active_token = None
+
+
+def set_token(token):
+    """設定當前要使用的 Notion token。"""
+    global _active_token
+    _active_token = token
+
+
+def _get_token():
+    return _active_token or config.NOTION_TOKEN
+
 
 def _headers():
     return {
-        "Authorization": f"Bearer {config.NOTION_TOKEN}",
+        "Authorization": f"Bearer {_get_token()}",
         "Content-Type": "application/json",
         "Notion-Version": NOTION_VERSION,
     }
@@ -56,16 +69,10 @@ def _api_get(path):
     return None
 
 
-def ensure_database():
-    """確保 Database 存在。第一次執行時自動建立，回傳 database_id。"""
-    db_id = config.get_db_id()
-    if db_id:
-        result = _api_get(f"/databases/{db_id}")
-        if result and not result.get("in_trash"):
-            return db_id
-
+def create_database(parent_page_id):
+    """在指定頁面下建立新的會議知識庫 Database，回傳 database_id。"""
     result = _api_post("/databases", {
-        "parent": {"type": "page_id", "page_id": config.NOTION_PARENT_PAGE_ID},
+        "parent": {"type": "page_id", "page_id": parent_page_id},
         "title": [{"type": "text", "text": {"content": "會議知識庫"}}],
         "properties": {
             "Name": {"title": {}},
@@ -74,10 +81,43 @@ def ensure_database():
             "Date": {"date": {}},
         },
     })
+    return result["id"]
 
-    db_id = result["id"]
-    config.save_db_id(db_id)
-    return db_id
+
+def list_databases(parent_page_id):
+    """列出指定頁面底下的所有 Database，回傳 [{id, title}]。"""
+    results = []
+    resp = _api_get(f"/blocks/{parent_page_id}/children?page_size=100")
+    if not resp:
+        return results
+    for block in resp.get("results", []):
+        if block.get("type") == "child_database":
+            db_id = block["id"]
+            title = block.get("child_database", {}).get("title", "未命名資料庫")
+            results.append({"id": db_id, "title": title})
+    return results
+
+
+def search_pages():
+    """搜尋 Integration 有權限存取的頁面，回傳 [{id, title}]。"""
+    results = []
+    payload = {"filter": {"value": "page", "property": "object"}, "page_size": 50}
+    data = _api_post("/search", payload)
+    if not data:
+        return results
+    for page in data.get("results", []):
+        if page.get("in_trash"):
+            continue
+        title_parts = page.get("properties", {}).get("title", {}).get("title", [])
+        if not title_parts:
+            # 嘗試從 page 的 title 欄位取得名稱
+            for prop in page.get("properties", {}).values():
+                if prop.get("type") == "title" and prop.get("title"):
+                    title_parts = prop["title"]
+                    break
+        title = "".join(t.get("plain_text", "") for t in title_parts) if title_parts else "未命名頁面"
+        results.append({"id": page["id"], "title": title})
+    return results
 
 
 def upload_meeting(db_id, meeting_name, date_str, tags, summary_md, transcript_text,
@@ -230,16 +270,6 @@ def _heading3_block(text):
         "object": "block",
         "type": "heading_3",
         "heading_3": {
-            "rich_text": [{"type": "text", "text": {"content": text[:2000]}}]
-        },
-    }
-
-
-def _bullet_block(text):
-    return {
-        "object": "block",
-        "type": "bulleted_list_item",
-        "bulleted_list_item": {
             "rich_text": [{"type": "text", "text": {"content": text[:2000]}}]
         },
     }
