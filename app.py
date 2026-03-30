@@ -13,16 +13,19 @@ def main():
     st.title("🎙️ 會議管理助手")
     st.caption("上傳錄音 → 審閱逐字稿 → AI 摘要 → 審閱修改 → 存入 Notion")
 
-    if not _check_config():
-        return
-
-    # 初始化 session state
+    # --- 初始化 session state（sidebar 元件需要） ---
     for key in ['raw_transcript', 'confirmed_transcript', 'summary',
                 'summary_draft', 'key_points', 'output_dir', 'page_url',
                 'step', 'meeting_name', 'date_str', 'tags', 'participants',
-                'replace_pairs_count', 'editor_version', 'summarizing']:
+                'replace_pairs_count', 'editor_version', 'summarizing', 'uploading',
+                'summary_version_idx', 'draft_base_version', 'notion_target_page', 'notion_target_db']:
         if key not in st.session_state:
             st.session_state[key] = None
+    if 'summary_versions' not in st.session_state:
+        st.session_state.summary_versions = []
+    for cache_key in ['notion_pages', 'notion_databases', 'notion_selected_page']:
+        if cache_key not in st.session_state:
+            st.session_state[cache_key] = None
     if st.session_state.step is None:
         st.session_state.step = 0
     if st.session_state.replace_pairs_count is None:
@@ -31,6 +34,27 @@ def main():
         st.session_state.editor_version = 0
     if st.session_state.summarizing is None:
         st.session_state.summarizing = False
+    if st.session_state.uploading is None:
+        st.session_state.uploading = False
+    if 'summary_editor_ver' not in st.session_state:
+        st.session_state.summary_editor_ver = 0
+    if 'meta_tags_input' not in st.session_state:
+        st.session_state.meta_tags_input = ""
+    if 'meta_participants_input' not in st.session_state:
+        st.session_state.meta_participants_input = ""
+
+    # --- Sidebar（永遠顯示，不受 config check 阻塞） ---
+    _show_meeting_browser()
+    _show_notion_accounts()
+    _show_style_settings()
+
+    if not _check_config():
+        return
+
+    # 沒有 Notion 帳號時阻擋主流程
+    if not config.load_notion_tokens():
+        st.info("👈 請先在左側『🔑 Notion 帳號』新增至少一組 Token，才能開始使用。")
+        return
 
     # --- 輸入區 ---
     st.header("📁 上傳會議檔案")
@@ -53,14 +77,11 @@ def main():
         placeholder="例：James, Frank, Justin, 宇航",
     )
 
-    tags = [t.strip() for t in tags_input.split(',') if t.strip()] if tags_input else []
-    participants = [p.strip() for p in participants_input.split(',') if p.strip()] if participants_input else []
+    tags = _parse_comma_list(tags_input)
+    participants = _parse_comma_list(participants_input)
     date_str = meeting_date.strftime('%Y-%m-%d')
 
     st.caption(f"🤖 摘要模型：`{config.LLM_MODEL}`（可在 .env 切換）")
-
-    # --- Sidebar: 摘要偏好設定 ---
-    _show_style_settings()
 
     # --- Step 1: 轉錄按鈕 ---
     can_start = uploaded_file is not None and bool(meeting_name)
@@ -69,6 +90,8 @@ def main():
         st.session_state.date_str = date_str
         st.session_state.tags = tags
         st.session_state.participants = participants
+        st.session_state.meta_tags_input = ", ".join(tags)
+        st.session_state.meta_participants_input = ", ".join(participants)
         st.session_state.page_url = None
         # 重設後續步驟
         for key in ['confirmed_transcript', 'summary', 'summary_draft', 'key_points']:
@@ -87,6 +110,137 @@ def main():
 
 
 # ──────────────────────────────────────────────
+# Sidebar: 歷史會議瀏覽
+# ──────────────────────────────────────────────
+
+def _scan_meetings():
+    """掃描 output/ 資料夾，回傳會議清單（按日期降序）。"""
+    output_root = config.OUTPUT_DIR
+    if not output_root.exists():
+        return []
+
+    meetings = []
+    for d in output_root.iterdir():
+        if not d.is_dir():
+            continue
+        # 資料夾格式：{YYYY-MM-DD}_{name}
+        match = re.match(r'^(\d{4}-\d{2}-\d{2})_(.+)$', d.name)
+        if not match:
+            continue
+        date_str = match.group(1)
+        name = match.group(2)
+
+        has_transcript = (d / "transcript_raw.txt").exists()
+        has_draft = (d / "summary_draft.md").exists()
+        has_uploaded = (d / "summary.md").exists()
+        ver_count = len(list(d.glob("summary_v*.md")))
+
+        if has_uploaded:
+            status = "🟢"
+            status_text = "已上傳"
+        elif has_draft or ver_count > 0:
+            status = "🟡"
+            status_text = "草稿"
+        elif has_transcript:
+            status = "🔵"
+            status_text = "僅逐字稿"
+        else:
+            continue  # 空資料夾跳過
+
+        meetings.append({
+            "path": d,
+            "date": date_str,
+            "name": name,
+            "status": status,
+            "status_text": status_text,
+            "has_transcript": has_transcript,
+            "has_draft": has_draft,
+            "has_uploaded": has_uploaded,
+            "ver_count": ver_count,
+        })
+
+    meetings.sort(key=lambda m: m["date"], reverse=True)
+    return meetings
+
+
+def _show_meeting_browser():
+    """側邊欄：歷史會議清單。"""
+    with st.sidebar:
+        with st.expander("📂 歷史會議", expanded=False):
+            meetings = _scan_meetings()
+            if not meetings:
+                st.caption("尚無歷史會議")
+                return
+
+            # 日期篩選
+            all_dates = sorted(set(m["date"] for m in meetings), reverse=True)
+            date_options = ["全部"] + all_dates
+            selected_date = st.selectbox(
+                "依日期篩選",
+                date_options,
+                key="meeting_browser_date",
+                label_visibility="collapsed",
+            )
+            if selected_date != "全部":
+                meetings = [m for m in meetings if m["date"] == selected_date]
+
+            st.caption(f"共 {len(meetings)} 場會議　🟢已上傳 🟡草稿 🔵僅逐字稿")
+
+            for m in meetings:
+                label = f"{m['status']} {m['date']}　{m['name']}"
+                if m["ver_count"] > 0:
+                    label += f"（{m['ver_count']}版）"
+                if st.button(label, key=f"open_{m['path'].name}", use_container_width=True):
+                    _resume_meeting(m)
+                    st.rerun()
+
+
+def _resume_meeting(meeting_info):
+    """從磁碟載入一場既有會議，跳到對應步驟。"""
+    output_dir = meeting_info["path"]
+
+    # 重設所有 session state
+    for key in ['raw_transcript', 'confirmed_transcript', 'summary',
+                'summary_draft', 'key_points', 'page_url']:
+        st.session_state[key] = None
+    st.session_state.summary_versions = []
+    st.session_state.summary_version_idx = None
+    st.session_state.draft_base_version = None
+    # 遞增版本號（而非重設為 0），確保 widget key 與上一場會議不同
+    st.session_state.summary_editor_ver = st.session_state.get('summary_editor_ver', 0) + 1
+    st.session_state.editor_version = st.session_state.get('editor_version', 0) + 1
+    st.session_state.replace_pairs_count = 1
+    st.session_state.summarizing = False
+    st.session_state.uploading = False
+
+    # 基本資訊
+    st.session_state.output_dir = str(output_dir)
+    st.session_state.meeting_name = meeting_info["name"]
+    st.session_state.date_str = meeting_info["date"]
+
+    # 載入逐字稿
+    raw_path = output_dir / "transcript_raw.txt"
+    if raw_path.exists():
+        transcript = raw_path.read_text(encoding='utf-8')
+        st.session_state.raw_transcript = transcript
+        st.session_state.confirmed_transcript = transcript
+        st.session_state.step = 1  # 預設到逐字稿審閱
+
+    # 載入 metadata（tags, participants）
+    meta_path = output_dir / "meeting_meta.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        st.session_state.tags = meta.get("tags", [])
+        st.session_state.participants = meta.get("participants", [])
+    # 預填 metadata 文字欄位（供 Step 1/2 的 text_input 綁定）
+    st.session_state.meta_tags_input = ", ".join(st.session_state.tags or [])
+    st.session_state.meta_participants_input = ", ".join(st.session_state.participants or [])
+
+    # 載入摘要版本 + 草稿（會覆蓋 step 為 2）
+    _load_versions_from_disk(output_dir)
+
+
+# ──────────────────────────────────────────────
 # Config check
 # ──────────────────────────────────────────────
 
@@ -94,14 +248,76 @@ def _check_config():
     issues = []
     if not config.OPENAI_API_KEY:
         issues.append("缺少 OPENAI_API_KEY")
-    if not config.NOTION_TOKEN:
-        issues.append("缺少 NOTION_TOKEN")
-    if not config.NOTION_PARENT_PAGE_ID:
-        issues.append("缺少 NOTION_PARENT_PAGE_ID")
     if issues:
-        st.error("⚠️ 設定不完整，請編輯 `.env` 檔案：\n" + "\n".join(f"- {i}" for i in issues))
+        st.error("⚠️ 設定不完整：\n" + "\n".join(f"- {i}" for i in issues))
         return False
     return True
+
+
+# ──────────────────────────────────────────────
+# Sidebar: Notion 帳號管理
+# ──────────────────────────────────────────────
+
+def _show_notion_accounts():
+    """側邊欄：管理多個 Notion workspace tokens。"""
+    import notion_uploader
+
+    with st.sidebar:
+        tokens = config.load_notion_tokens()
+        with st.expander("🔑 Notion 帳號", expanded=not tokens):
+
+            if tokens:
+                # 選擇要用的帳號
+                labels = [t["label"] for t in tokens]
+                current_idx = st.session_state.get("notion_token_idx", 0)
+                if current_idx >= len(tokens):
+                    current_idx = 0
+
+                selected_idx = st.radio(
+                    "使用帳號",
+                    range(len(labels)),
+                    format_func=lambda i: labels[i],
+                    index=current_idx,
+                    key="notion_account_radio",
+                )
+
+                # 切換帳號時重設頁面快取
+                if selected_idx != st.session_state.get("notion_token_idx"):
+                    st.session_state.notion_token_idx = selected_idx
+                    st.session_state.notion_pages = None
+                    st.session_state.notion_databases = None
+
+                # 設定 active token
+                active_token = tokens[selected_idx]["token"]
+                notion_uploader.set_token(active_token)
+                st.session_state.active_notion_token = active_token
+
+                st.caption(f"Token: ...{active_token[-6:]}")
+
+                # 刪除按鈕（.env 的不能刪）
+                if tokens[selected_idx]["label"] != "預設（.env）":
+                    if st.button("🗑️ 移除此帳號", key="remove_notion_token"):
+                        config.remove_notion_token(active_token)
+                        st.session_state.notion_token_idx = 0
+                        st.session_state.notion_pages = None
+                        st.session_state.notion_databases = None
+                        st.rerun()
+            else:
+                st.info("尚無 Notion 帳號，請在下方新增。")
+
+            # 新增帳號
+            st.divider()
+            st.caption("新增 Notion 帳號")
+            new_label = st.text_input("標籤", placeholder="例：公司、個人", key="new_notion_label")
+            new_token = st.text_input("Token", placeholder="secret_...", type="password", key="new_notion_token")
+            if st.button("➕ 新增", key="add_notion_token"):
+                if new_label and new_token:
+                    config.save_notion_token(new_label.strip(), new_token.strip())
+                    st.session_state.notion_pages = None
+                    st.session_state.notion_databases = None
+                    st.rerun()
+                else:
+                    st.warning("請填入標籤和 Token")
 
 
 # ──────────────────────────────────────────────
@@ -226,6 +442,54 @@ def _show_style_settings():
 # Step 1: 轉錄（只做轉錄，不做摘要）
 # ──────────────────────────────────────────────
 
+def _load_versions_from_disk(output_dir: Path):
+    """從磁碟載入歷史版本 (summary_v*.md) 和草稿 (summary_draft.md)。"""
+    import re as _re
+
+    # 載入 summary_v1.md, summary_v2.md, ...
+    ver_files = sorted(output_dir.glob("summary_v*.md"),
+                       key=lambda p: int(_re.search(r'summary_v(\d+)', p.stem).group(1)))
+    versions = []
+    for vf in ver_files:
+        content = vf.read_text(encoding='utf-8')
+        mtime = datetime.fromtimestamp(vf.stat().st_mtime).strftime("%H:%M:%S")
+        versions.append({
+            "summary": content,
+            "key_points": "",
+            "auto_tags": [],
+            "timestamp": mtime,
+        })
+
+    if versions:
+        st.session_state.summary_versions = versions
+        st.session_state.summary_version_idx = len(versions) - 1
+
+    # 載入草稿
+    draft_path = output_dir / "summary_draft.md"
+    if draft_path.exists():
+        draft_raw = draft_path.read_text(encoding='utf-8')
+        # 解析 base version 標記
+        base_match = _re.match(r'<!-- draft_base_version: (\d+) -->\n', draft_raw)
+        if base_match:
+            st.session_state.draft_base_version = int(base_match.group(1))
+            draft_text = draft_raw[base_match.end():]
+        else:
+            # 沒有標記時：如果有版本，預設為最後一版
+            st.session_state.draft_base_version = len(versions) if versions else None
+            draft_text = draft_raw
+
+        st.session_state.summary = draft_text
+        st.session_state.summary_draft = draft_text
+        st.session_state.step = 2
+    elif versions:
+        # 沒有草稿但有版本 → 用最後一版
+        last = versions[-1]
+        st.session_state.summary = last["summary"]
+        st.session_state.summary_draft = last["summary"]
+        st.session_state.draft_base_version = len(versions)
+        st.session_state.step = 2
+
+
 def _do_transcription(uploaded_file, meeting_name, date_str):
     from transcriber import transcribe
 
@@ -252,6 +516,9 @@ def _do_transcription(uploaded_file, meeting_name, date_str):
             if not audio_path.exists():
                 with open(audio_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
+
+            # 載入磁碟上的歷史版本 + 草稿
+            _load_versions_from_disk(output_dir)
         else:
             status.update(label="儲存音檔...")
             audio_ext = Path(uploaded_file.name).suffix
@@ -271,12 +538,22 @@ def _do_transcription(uploaded_file, meeting_name, date_str):
 
         st.session_state.raw_transcript = raw_transcript
         st.session_state.step = 1
+        _save_meeting_meta(output_dir)
         status.update(label="✅ 轉錄完成，請審閱逐字稿", state="complete")
         status.write(f"共 {len(raw_transcript):,} 字")
 
     except Exception as e:
         status.update(label="❌ 轉錄失敗", state="error")
         status.write(f"❌ {str(e)}")
+
+
+# ──────────────────────────────────────────────
+# Helper: 逗號分隔字串解析
+# ──────────────────────────────────────────────
+
+def _parse_comma_list(text: str) -> list[str]:
+    """將逗號分隔字串解析為 list，自動 trim 並過濾空值。"""
+    return [item.strip() for item in text.split(',') if item.strip()] if text else []
 
 
 # ──────────────────────────────────────────────
@@ -294,6 +571,14 @@ def _show_transcript_review():
     if 'summarize_error' in st.session_state:
         st.error(f"❌ 摘要產生失敗：{st.session_state.summarize_error}")
         del st.session_state['summarize_error']
+
+    # Metadata 欄位（標籤 + 參與者）
+    is_busy_meta = st.session_state.summarizing or st.session_state.uploading
+    meta_col1, meta_col2 = st.columns(2)
+    with meta_col1:
+        st.text_input("🏷️ 標籤（逗號分隔）", key="meta_tags_input", disabled=is_busy_meta)
+    with meta_col2:
+        st.text_input("👥 參與者（逗號分隔）", key="meta_participants_input", disabled=is_busy_meta)
 
     st.info("👇 請檢查轉錄結果。如有人名或術語辨識錯誤，可用下方「批次取代」一次修正，或直接在文字框中編輯。")
 
@@ -321,7 +606,7 @@ def _show_transcript_review():
         with col_apply:
             if st.button("🔄 套用取代", key="apply_replace", disabled=len(pairs) == 0):
                 # 從 text_area 讀取（可能 user 有手動編輯過）
-                current = st.session_state.get("transcript_editor", st.session_state.raw_transcript)
+                current = st.session_state.get(f"transcript_editor_v{st.session_state.editor_version}", st.session_state.raw_transcript)
                 applied = []
                 for old, new in pairs:
                     n = current.count(old)
@@ -348,11 +633,14 @@ def _show_transcript_review():
 
     # --- 確認 ---
     has_summary = st.session_state.summary is not None
-    is_busy = st.session_state.summarizing
+    is_busy = st.session_state.summarizing or st.session_state.uploading
     cols = st.columns([1, 1, 2]) if has_summary else st.columns([1, 3])
     with cols[0]:
         btn_label = "⏳ 摘要產生中..." if is_busy else "✅ 確認逐字稿，產生摘要"
         if st.button(btn_label, type="primary", disabled=is_busy):
+            # 同步 metadata
+            st.session_state.tags = _parse_comma_list(st.session_state.meta_tags_input)
+            st.session_state.participants = _parse_comma_list(st.session_state.meta_participants_input)
             final_transcript = st.session_state.get(editor_key, edited_transcript)
             st.session_state.raw_transcript = final_transcript
             st.session_state.confirmed_transcript = final_transcript
@@ -365,6 +653,9 @@ def _show_transcript_review():
     if has_summary:
         with cols[1]:
             if st.button("➡️ 前往審閱摘要", disabled=is_busy):
+                # 同步 metadata
+                st.session_state.tags = _parse_comma_list(st.session_state.meta_tags_input)
+                st.session_state.participants = _parse_comma_list(st.session_state.meta_participants_input)
                 final_transcript = st.session_state.get(editor_key, edited_transcript)
                 st.session_state.raw_transcript = final_transcript
                 st.session_state.confirmed_transcript = final_transcript
@@ -409,14 +700,28 @@ def _do_summarize():
         # 如果使用者沒有手動填標籤，就用 AI 自動產生的
         if not st.session_state.tags and auto_tags:
             st.session_state.tags = auto_tags
+            st.session_state.meta_tags_input = ", ".join(auto_tags)
 
-        # 清除 widget cache，讓編輯器顯示新的摘要內容
-        for wkey in ['summary_editor', 'key_points_editor']:
-            if wkey in st.session_state:
-                del st.session_state[wkey]
+        # 儲存此版本到歷史紀錄（記憶體 + 磁碟）
+        ver = {
+            "summary": summary,
+            "key_points": key_points,
+            "auto_tags": auto_tags,
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+        }
+        st.session_state.summary_versions.append(ver)
+        ver_num = len(st.session_state.summary_versions)
+        st.session_state.summary_version_idx = ver_num - 1
+        st.session_state.draft_base_version = ver_num
 
+        # 寫入磁碟：summary_v{N}.md + summary_draft.md
         output_dir = Path(st.session_state.output_dir)
-        (output_dir / "summary_draft.md").write_text(summary, encoding='utf-8')
+        (output_dir / f"summary_v{ver_num}.md").write_text(summary, encoding='utf-8')
+        draft_content = f"<!-- draft_base_version: {ver_num} -->\n" + summary
+        (output_dir / "summary_draft.md").write_text(draft_content, encoding='utf-8')
+
+        # 遞增 widget 版本號，強制 Streamlit 重建編輯器
+        st.session_state.summary_editor_ver += 1
 
         st.session_state.step = 2
         st.session_state.summarizing = False
@@ -445,21 +750,64 @@ def _show_summary_review():
         st.error(f"❌ 摘要產生失敗：{st.session_state.summarize_error}")
         del st.session_state['summarize_error']
 
-    st.info("👇 請檢查 AI 產生的摘要，可直接修改。確認無誤後按「上傳至 Notion」。")
+    # 顯示上一次上傳失敗的錯誤訊息
+    if 'upload_error' in st.session_state:
+        st.error(f"❌ 上傳失敗：{st.session_state.upload_error}")
+        del st.session_state['upload_error']
 
-    is_busy = st.session_state.summarizing
+    is_busy = st.session_state.summarizing or st.session_state.uploading
 
+    # Metadata 欄位（標籤 + 參與者）
+    meta_col1, meta_col2 = st.columns(2)
+    with meta_col1:
+        st.text_input("🏷️ 標籤（逗號分隔）", key="meta_tags_input", disabled=is_busy)
+    with meta_col2:
+        st.text_input("👥 參與者（逗號分隔）", key="meta_participants_input", disabled=is_busy)
+    versions = st.session_state.summary_versions
+
+    # 版本選擇器（2 個以上版本時顯示）
+    if len(versions) > 1:
+        labels = [f"第 {i+1} 版（{v['timestamp']}）" for i, v in enumerate(versions)]
+        current_idx = st.session_state.summary_version_idx or 0
+        selected = st.radio(
+            "📋 摘要版本",
+            range(len(labels)),
+            format_func=lambda i: labels[i],
+            index=current_idx,
+            horizontal=True,
+            key="version_selector",
+            disabled=is_busy,
+        )
+        if selected != st.session_state.summary_version_idx:
+            ver = versions[selected]
+            st.session_state.summary = ver["summary"]
+            st.session_state.key_points = ver["key_points"]
+            st.session_state.summary_version_idx = selected
+            st.session_state.draft_base_version = selected + 1
+            st.session_state.summary_editor_ver += 1
+            st.rerun()
+        st.caption(f"共 {len(versions)} 個版本，選擇後可再編輯，最後按「上傳」即為最終版")
+    else:
+        st.info("👇 請檢查 AI 產生的摘要，可直接修改。確認無誤後按「上傳至 Notion」。")
+
+    base_ver = st.session_state.draft_base_version
+    if base_ver:
+        st.caption(f"📌 目前草稿基於第 {base_ver} 版 AI 摘要")
+
+    sev = st.session_state.summary_editor_ver
     edited_summary = st.text_area(
         "摘要內容（可編輯）",
         value=st.session_state.summary,
         height=500,
-        key="summary_editor",
+        key=f"summary_editor_v{sev}",
+        disabled=is_busy,
     )
 
     edited_key_points = st.text_input(
         "Highlights（可編輯）",
         value=st.session_state.key_points or "",
-        key="key_points_editor",
+        key=f"key_points_editor_v{sev}",
+        disabled=is_busy,
     )
 
     with st.expander("📄 對照逐字稿", expanded=False):
@@ -472,26 +820,140 @@ def _show_summary_review():
                 label_visibility="collapsed",
             )
 
-    col1, col2, col3 = st.columns([1, 1, 2])
+    # Notion 目標頁面選擇
+    _show_notion_page_selector(disabled=is_busy)
+
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
     with col1:
-        if st.button("✅ 確認上傳 Notion", type="primary", disabled=is_busy):
+        target = st.session_state.notion_target_page
+        upload_disabled = is_busy or not target
+        if st.button("✅ 確認上傳 Notion", type="primary", disabled=upload_disabled):
+            # 同步 metadata
+            st.session_state.tags = _parse_comma_list(st.session_state.meta_tags_input)
+            st.session_state.participants = _parse_comma_list(st.session_state.meta_participants_input)
             st.session_state.summary = edited_summary
             st.session_state.key_points = edited_key_points
-            _upload_to_notion(edited_summary, edited_key_points)
+            st.session_state.uploading = True
+            st.rerun()
     with col2:
+        if st.button("💾 儲存草稿", disabled=is_busy):
+            # 同步 metadata
+            st.session_state.tags = _parse_comma_list(st.session_state.meta_tags_input)
+            st.session_state.participants = _parse_comma_list(st.session_state.meta_participants_input)
+            output_dir = Path(st.session_state.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            draft_content = edited_summary
+            base_ver = st.session_state.draft_base_version
+            if base_ver:
+                header = f"<!-- draft_base_version: {base_ver} -->\n"
+                draft_content = header + edited_summary
+            (output_dir / "summary_draft.md").write_text(draft_content, encoding='utf-8')
+            st.session_state.summary = edited_summary
+            st.session_state.key_points = edited_key_points
+            _save_meeting_meta(output_dir)
+            st.toast("✅ 草稿已儲存！下次開啟同一場會議時會自動載入。")
+    with col3:
         btn_label = "⏳ 摘要產生中..." if is_busy else "🔄 重新產生摘要"
         if st.button(btn_label, disabled=is_busy):
             st.session_state.summarizing = True
             st.rerun()
-    with col3:
+    with col4:
         if st.button("⬅️ 回到逐字稿", disabled=is_busy):
             st.session_state.step = 1
             st.rerun()
 
+    # 上傳中：在畫面底部才真正執行上傳
+    if st.session_state.uploading:
+        _upload_to_notion(st.session_state.summary, st.session_state.key_points)
+
     # 摘要產生中：按鈕已 disabled，在畫面底部才真正執行摘要
-    if is_busy:
+    if st.session_state.summarizing:
         _do_summarize()
         st.rerun()
+
+
+# ──────────────────────────────────────────────
+# Notion 頁面選擇
+# ──────────────────────────────────────────────
+
+def _show_notion_page_selector(disabled=False):
+    """讓使用者選擇要上傳到 Notion 的哪個頁面和資料庫。"""
+    if not st.session_state.get("active_notion_token"):
+        st.info("請先在左側「🔑 Notion 帳號」新增 Token，才能選擇上傳頁面。")
+        return
+
+    from notion_uploader import search_pages, list_databases
+
+    # 快取頁面清單
+    if st.session_state.notion_pages is None:
+        with st.spinner("讀取 Notion 頁面..."):
+            st.session_state.notion_pages = search_pages()
+
+    pages = st.session_state.notion_pages
+
+    if not pages:
+        st.warning("⚠️ 找不到可用的 Notion 頁面。請確認 Integration 已加入至少一個頁面。")
+        return
+
+    # ── 第一層：選頁面 ──
+    page_options = {p["id"]: p["title"] for p in pages}
+    page_ids = list(page_options.keys())
+
+    default_idx = 0
+    default_page = config.NOTION_PARENT_PAGE_ID
+    if default_page and default_page in page_ids:
+        default_idx = page_ids.index(default_page)
+
+    col_page, col_refresh = st.columns([4, 1])
+    with col_page:
+        selected_page = st.selectbox(
+            "📄 Notion 頁面",
+            options=page_ids,
+            format_func=lambda pid: page_options[pid],
+            index=default_idx,
+            key="notion_page_selector",
+            disabled=disabled,
+        )
+    with col_refresh:
+        st.write("")
+        st.write("")
+        if st.button("🔄", help="重新載入頁面清單", disabled=disabled):
+            st.session_state.notion_pages = None
+            st.session_state.notion_databases = None
+            st.session_state.notion_selected_page = None
+            st.rerun()
+
+    # 頁面切換時重新載入 databases
+    if st.session_state.get("notion_selected_page") != selected_page:
+        st.session_state.notion_selected_page = selected_page
+        st.session_state.notion_databases = None
+
+    # ── 第二層：選資料庫 ──
+    if st.session_state.get("notion_databases") is None:
+        with st.spinner("讀取資料庫..."):
+            st.session_state.notion_databases = list_databases(selected_page)
+
+    databases = st.session_state.notion_databases
+    NEW_DB_SENTINEL = "__create_new__"
+
+    if databases:
+        db_options = {d["id"]: d["title"] for d in databases}
+        db_options[NEW_DB_SENTINEL] = "➕ 建立新的會議知識庫"
+        db_ids = list(db_options.keys())
+
+        selected_db = st.selectbox(
+            "🗄️ 資料庫",
+            options=db_ids,
+            format_func=lambda did: db_options[did],
+            key="notion_db_selector",
+            disabled=disabled,
+        )
+    else:
+        st.caption("📂 此頁面尚無資料庫，上傳時將自動建立「會議知識庫」")
+        selected_db = NEW_DB_SENTINEL
+
+    st.session_state.notion_target_page = selected_page
+    st.session_state.notion_target_db = selected_db
 
 
 # ──────────────────────────────────────────────
@@ -499,7 +961,12 @@ def _show_summary_review():
 # ──────────────────────────────────────────────
 
 def _upload_to_notion(final_summary, final_key_points):
-    from notion_uploader import ensure_database, upload_meeting
+    from notion_uploader import create_database, upload_meeting, set_token
+
+    # 確保使用正確的 token
+    active_token = st.session_state.get("active_notion_token")
+    if active_token:
+        set_token(active_token)
 
     output_dir = Path(st.session_state.output_dir)
 
@@ -508,10 +975,23 @@ def _upload_to_notion(final_summary, final_key_points):
             status.update(label="儲存本地備份...", state="running")
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "summary.md").write_text(final_summary, encoding='utf-8')
+            # 同時更新草稿檔為最終上傳版
+            draft_content = final_summary
+            base_ver = st.session_state.draft_base_version
+            if base_ver:
+                draft_content = f"<!-- draft_base_version: {base_ver} -->\n" + final_summary
+            (output_dir / "summary_draft.md").write_text(draft_content, encoding='utf-8')
+            _save_meeting_meta(output_dir)
             _save_feedback(output_dir, final_summary, final_key_points)
 
             status.update(label="連線 Notion 資料庫...", state="running")
-            db_id = ensure_database()
+            target_page = st.session_state.notion_target_page
+            db_id = st.session_state.get("notion_target_db")
+
+            if not db_id or db_id == "__create_new__":
+                status.update(label="建立新資料庫...", state="running")
+                db_id = create_database(target_page)
+                st.session_state.notion_databases = None  # 下次重新載入
             transcript_to_upload = (
                 st.session_state.confirmed_transcript
                 or st.session_state.raw_transcript
@@ -531,16 +1011,33 @@ def _upload_to_notion(final_summary, final_key_points):
                 progress_callback=_progress,
             )
             st.session_state.page_url = page_url
+            st.session_state.uploading = False
             st.session_state.step = 3
             status.update(label="上傳完成！", state="complete")
             st.rerun()
     except Exception as e:
-        st.error(f"上傳失敗：{str(e)}")
+        st.session_state.upload_error = str(e)
+        st.session_state.uploading = False
+        st.rerun()
 
 
 # ──────────────────────────────────────────────
 # Feedback
 # ──────────────────────────────────────────────
+
+def _save_meeting_meta(output_dir):
+    """儲存會議 metadata（tags, participants）到磁碟。"""
+    output_dir = Path(output_dir)
+    meta = {
+        "meeting_name": st.session_state.meeting_name,
+        "date": st.session_state.date_str,
+        "tags": st.session_state.tags or [],
+        "participants": st.session_state.participants or [],
+    }
+    (output_dir / "meeting_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+
 
 def _save_feedback(output_dir, final_summary, final_key_points):
     draft = st.session_state.summary_draft or ""
