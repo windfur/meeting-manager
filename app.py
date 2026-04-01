@@ -1,9 +1,18 @@
 import re
 import json
+import logging
 import streamlit as st
 from pathlib import Path
 from datetime import date, datetime
 import config
+
+# ── Logging 設定：輸出到 console，過濾 API key ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 st.set_page_config(page_title="會議管理助手", page_icon="🎙️", layout="wide")
@@ -43,9 +52,14 @@ def main():
     if 'meta_participants_input' not in st.session_state:
         st.session_state.meta_participants_input = ""
 
+    # 將 _do_summarize 產生的 pending 值套用到 widget key（在 widget 渲染前）
+    if '_pending_meta_tags' in st.session_state:
+        st.session_state.meta_tags_input = st.session_state._pending_meta_tags
+        del st.session_state['_pending_meta_tags']
+
     # --- Sidebar（永遠顯示，不受 config check 阻塞） ---
-    _show_meeting_browser()
     _show_notion_accounts()
+    _show_meeting_browser()
     _show_style_settings()
 
     if not _check_config():
@@ -135,9 +149,19 @@ def _scan_meetings():
         has_uploaded = (d / "summary.md").exists()
         ver_count = len(list(d.glob("summary_v*.md")))
 
+        # 讀取 uploaded_by（FR-004, FR-005 向下相容）
+        uploaded_by = None
+        meta_path = d / "meeting_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding='utf-8'))
+                uploaded_by = meta.get("uploaded_by")
+            except (json.JSONDecodeError, KeyError):
+                pass
+
         if has_uploaded:
             status = "🟢"
-            status_text = "已上傳"
+            status_text = f"已上傳（{uploaded_by}）" if uploaded_by else "已上傳"
         elif has_draft or ver_count > 0:
             status = "🟡"
             status_text = "草稿"
@@ -157,6 +181,7 @@ def _scan_meetings():
             "has_draft": has_draft,
             "has_uploaded": has_uploaded,
             "ver_count": ver_count,
+            "uploaded_by": uploaded_by,
         })
 
     meetings.sort(key=lambda m: m["date"], reverse=True)
@@ -184,10 +209,33 @@ def _show_meeting_browser():
             if selected_date != "全部":
                 meetings = [m for m in meetings if m["date"] == selected_date]
 
+            # 帳號篩選（FR-006, FR-007 AND 日期篩選）
+            account_labels = sorted(set(
+                m["uploaded_by"] for m in meetings if m.get("uploaded_by")
+            ))
+            account_options = ["全部", "只看未上傳"] + account_labels
+            # FR-010: 切換帳號時自動帶入篩選
+            pending = st.session_state.pop("_pending_browser_account", None)
+            if pending:
+                if pending in account_options:
+                    st.session_state.meeting_browser_account = pending
+                else:
+                    st.session_state.meeting_browser_account = "全部"
+            selected_account = st.selectbox(
+                "依帳號篩選",
+                account_options,
+                key="meeting_browser_account",
+                label_visibility="collapsed",
+            )
+            if selected_account == "只看未上傳":
+                meetings = [m for m in meetings if not m["has_uploaded"]]
+            elif selected_account != "全部":
+                meetings = [m for m in meetings if m.get("uploaded_by") == selected_account]
+
             st.caption(f"共 {len(meetings)} 場會議　🟢已上傳 🟡草稿 🔵僅逐字稿")
 
             for m in meetings:
-                label = f"{m['status']} {m['date']}　{m['name']}"
+                label = f"{m['status']}{m['status_text']} {m['date']}　{m['name']}"
                 if m["ver_count"] > 0:
                     label += f"（{m['ver_count']}版）"
                 if st.button(label, key=f"open_{m['path'].name}", use_container_width=True):
@@ -269,6 +317,13 @@ def _show_notion_accounts():
             if tokens:
                 # 選擇要用的帳號
                 labels = [t["label"] for t in tokens]
+                # 啟動時從磁碟還原上次選擇的帳號
+                if "notion_token_idx" not in st.session_state:
+                    saved_label = config.load_active_notion_account()
+                    if saved_label and saved_label in labels:
+                        st.session_state.notion_token_idx = labels.index(saved_label)
+                    else:
+                        st.session_state.notion_token_idx = 0
                 current_idx = st.session_state.get("notion_token_idx", 0)
                 if current_idx >= len(tokens):
                     current_idx = 0
@@ -286,6 +341,10 @@ def _show_notion_accounts():
                     st.session_state.notion_token_idx = selected_idx
                     st.session_state.notion_pages = None
                     st.session_state.notion_databases = None
+                    # FR-010: 切換帳號時自動篩選歷史會議
+                    st.session_state._pending_browser_account = labels[selected_idx]
+                    # 持久化帳號選擇
+                    config.save_active_notion_account(labels[selected_idx])
 
                 # 設定 active token
                 active_token = tokens[selected_idx]["token"]
@@ -679,16 +738,21 @@ def _show_transcript_review():
 def _do_summarize():
     from summarizer import summarize
 
+    transcript_len = len(st.session_state.confirmed_transcript or "")
+    participants = st.session_state.participants
+    logger.info("使用者觸發摘要 | 逐字稿長度=%d | 參與者=%s", transcript_len, participants)
+
     status = st.status("產生摘要中...", expanded=True)
 
     try:
         status.update(label="產生會議摘要...")
         result = summarize(
             st.session_state.confirmed_transcript,
-            participants=st.session_state.participants,
+            participants=participants,
             progress_callback=lambda msg: status.write(f"⏳ {msg}")
         )
         if not result or not result.get("summary"):
+            logger.error("摘要結果為空 | result=%s", result)
             raise RuntimeError("AI 未回傳摘要內容，請稍後重試")
 
         summary = result["summary"]
@@ -700,7 +764,8 @@ def _do_summarize():
         # 如果使用者沒有手動填標籤，就用 AI 自動產生的
         if not st.session_state.tags and auto_tags:
             st.session_state.tags = auto_tags
-            st.session_state.meta_tags_input = ", ".join(auto_tags)
+            # 透過 _pending 避免 widget 已渲染後直接賦值報錯
+            st.session_state._pending_meta_tags = ", ".join(auto_tags)
 
         # 儲存此版本到歷史紀錄（記憶體 + 磁碟）
         ver = {
@@ -726,10 +791,12 @@ def _do_summarize():
         st.session_state.step = 2
         st.session_state.summarizing = False
         status.update(label="✅ 摘要已產生，請審閱", state="complete")
+        logger.info("摘要產生成功 | 摘要長度=%d | 版本=%d", len(summary), ver_num)
 
     except Exception as e:
         st.session_state.summarizing = False
         st.session_state.summarize_error = str(e)
+        logger.error("摘要產生失敗 | %s: %s", type(e).__name__, str(e), exc_info=True)
         status.update(label="❌ 摘要產生失敗", state="error")
         status.write(f"❌ {str(e)}")
 
@@ -1011,6 +1078,11 @@ def _upload_to_notion(final_summary, final_key_points):
                 progress_callback=_progress,
             )
             st.session_state.page_url = page_url
+            # 記錄上傳帳號 label（FR-001, FR-003）
+            tokens = config.load_notion_tokens()
+            token_idx = st.session_state.get("notion_token_idx", 0)
+            account_label = tokens[token_idx]["label"] if token_idx < len(tokens) else None
+            _save_meeting_meta(output_dir, uploaded_by=account_label)
             st.session_state.uploading = False
             st.session_state.step = 3
             status.update(label="上傳完成！", state="complete")
@@ -1025,7 +1097,7 @@ def _upload_to_notion(final_summary, final_key_points):
 # Feedback
 # ──────────────────────────────────────────────
 
-def _save_meeting_meta(output_dir):
+def _save_meeting_meta(output_dir, uploaded_by=None):
     """儲存會議 metadata（tags, participants）到磁碟。"""
     output_dir = Path(output_dir)
     meta = {
@@ -1034,7 +1106,18 @@ def _save_meeting_meta(output_dir):
         "tags": st.session_state.tags or [],
         "participants": st.session_state.participants or [],
     }
-    (output_dir / "meeting_meta.json").write_text(
+    if uploaded_by is not None:
+        meta["uploaded_by"] = uploaded_by
+    # 保留既有的 uploaded_by（重新儲存草稿時不覆蓋）
+    meta_path = output_dir / "meeting_meta.json"
+    if uploaded_by is None and meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text(encoding='utf-8'))
+            if "uploaded_by" in existing:
+                meta["uploaded_by"] = existing["uploaded_by"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8'
     )
 

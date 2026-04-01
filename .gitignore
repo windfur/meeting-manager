@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .db_config.json
 .notion_tokens.json
+.notion_active_account
 output/
 feedback_log.jsonl
 summary_style.md

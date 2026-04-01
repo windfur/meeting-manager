@@ -18,6 +18,7 @@ LLM_MODEL = os.getenv("OPENAI_LLM_MODEL", "gpt-4.1-mini")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
 NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID", "")
 NOTION_TOKENS_FILE = BASE_DIR / ".notion_tokens.json"
+NOTION_ACTIVE_FILE = BASE_DIR / ".notion_active_account"
 
 # Audio
 MAX_AUDIO_SIZE_MB = 25
@@ -76,3 +77,15 @@ def remove_notion_token(token):
             json.dump(saved, f, ensure_ascii=False, indent=2)
     except (json.JSONDecodeError, KeyError):
         pass
+
+
+def save_active_notion_account(label):
+    """記錄目前使用的 Notion 帳號 label。"""
+    NOTION_ACTIVE_FILE.write_text(label, encoding="utf-8")
+
+
+def load_active_notion_account():
+    """讀取上次使用的 Notion 帳號 label，不存在則回傳 None。"""
+    if NOTION_ACTIVE_FILE.exists():
+        return NOTION_ACTIVE_FILE.read_text(encoding="utf-8").strip()
+    return None
