@@ -1,8 +1,10 @@
+import logging
 import time
 from pathlib import Path
 from openai import OpenAI
 import config
 
+logger = logging.getLogger(__name__)
 
 # ── Prompt 檔案路徑 ──
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -19,7 +21,9 @@ def _load_user_style():
     if style_file.exists():
         text = style_file.read_text(encoding='utf-8').strip()
         if text:
+            logger.info("已載入使用者自訂摘要規範 (%d 字元)", len(text))
             return text
+    logger.info("未使用自訂摘要規範，採用預設")
     return ""
 
 
@@ -43,38 +47,81 @@ def _build_phase2_prompt(user_style: str) -> str:
 
 def _call_api(client, model, messages, progress_callback=None, phase_label=""):
     """呼叫 OpenAI API，含重試邏輯。"""
+    msg_lengths = [len(m.get("content", "")) for m in messages]
+    total_chars = sum(msg_lengths)
+    logger.info("%s 開始呼叫 API | model=%s | 訊息數=%d | 總字元數=%d | 各訊息長度=%s",
+                phase_label, model, len(messages), total_chars, msg_lengths)
+
     for attempt in range(3):
+        logger.info("%s 第 %d/3 次嘗試...", phase_label, attempt + 1)
         try:
+            t0 = time.time()
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0.3,
                 max_tokens=32768,
             )
+            elapsed = time.time() - t0
+
+            # 記錄 token 用量
+            usage = getattr(response, 'usage', None)
+            if usage:
+                logger.info("%s API 回應成功 | 耗時=%.1fs | prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | finish_reason=%s",
+                            phase_label, elapsed,
+                            getattr(usage, 'prompt_tokens', '?'),
+                            getattr(usage, 'completion_tokens', '?'),
+                            getattr(usage, 'total_tokens', '?'),
+                            getattr(response.choices[0], 'finish_reason', '?'))
+            else:
+                logger.info("%s API 回應成功 | 耗時=%.1fs | finish_reason=%s (無 usage 資訊)",
+                            phase_label, elapsed,
+                            getattr(response.choices[0], 'finish_reason', '?'))
+
             content = response.choices[0].message.content
             if content is None:
                 finish = getattr(response.choices[0], 'finish_reason', 'unknown')
+                logger.error("%s API 回傳空白內容 | finish_reason=%s", phase_label, finish)
                 raise RuntimeError(
                     f"{phase_label} API 回傳空白內容（finish_reason: {finish}）"
                 )
+            logger.info("%s 取得回應內容 %d 字元", phase_label, len(content))
             return content
+        except RuntimeError:
+            raise
         except Exception as e:
-            error_str = str(e).lower()
-            if "rate_limit" in error_str or "429" in error_str:
-                wait = 10
+            error_type = type(e).__name__
+            error_str = str(e)
+            logger.warning("%s 第 %d/3 次失敗 | %s: %s", phase_label, attempt + 1, error_type, error_str)
+
+            if "rate_limit" in error_str.lower() or "429" in error_str:
+                wait = 10 * (attempt + 1)
+                logger.info("%s 偵測到速率限制，等待 %d 秒...", phase_label, wait)
                 if progress_callback:
                     progress_callback(f"{phase_label} API 速率限制，等待 {wait} 秒後重試...")
                 time.sleep(wait)
             elif attempt < 2:
-                time.sleep((attempt + 1) * 3)
+                wait = (attempt + 1) * 3
+                logger.info("%s 非速率限制錯誤，等待 %d 秒後重試...", phase_label, wait)
+                time.sleep(wait)
             else:
-                raise RuntimeError(f"{phase_label} 失敗（重試 3 次）：{str(e)}")
+                logger.error("%s 已重試 3 次仍失敗 | 最後錯誤: %s: %s", phase_label, error_type, error_str)
+                raise RuntimeError(f"{phase_label} 失敗（重試 3 次）：{error_str}")
 
+    logger.error("%s 失敗：API 速率限制耗盡重試次數", phase_label)
     raise RuntimeError(f"{phase_label} 失敗：API 速率限制，請稍後再試")
 
 
 def summarize(transcript: str, participants=None, progress_callback=None) -> dict:
     """兩階段摘要：先追蹤議題結論，再撰寫正式會議紀錄。"""
+    logger.info("===== 開始摘要流程 =====")
+    logger.info("逐字稿長度=%d 字元 | 參與者=%s | model=%s",
+                len(transcript), participants, config.LLM_MODEL)
+
+    if not config.OPENAI_API_KEY:
+        logger.error("OPENAI_API_KEY 未設定！")
+        raise RuntimeError("OPENAI_API_KEY 未設定，請檢查 .env 檔案")
+
     client = OpenAI(api_key=config.OPENAI_API_KEY)
     model = config.LLM_MODEL
 
@@ -139,4 +186,7 @@ def summarize(transcript: str, participants=None, progress_callback=None) -> dic
         summary = summary.replace(line, "")
     summary = summary.rstrip()
 
+    logger.info("===== 摘要流程完成 =====")
+    logger.info("摘要長度=%d 字元 | key_points=%s | auto_tags=%s",
+                len(summary), bool(key_points), auto_tags)
     return {"summary": summary, "key_points": key_points, "auto_tags": auto_tags}
