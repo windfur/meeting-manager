@@ -14,8 +14,8 @@ App Start
     ├─ Init session state (sidebar 元件需要)
     │
     ├─ Render sidebar (always, 不受任何 check 阻塞)
-    │   ├─ _show_meeting_browser()   ← 純本地操作，最常用放最上
-    │   ├─ _show_notion_accounts()
+    │   ├─ _show_notion_accounts()   ← 帳號切換會連動歷史會議篩選（003）
+    │   ├─ _show_meeting_browser()
     │   └─ _show_style_settings()
     │
     ├─ _check_config()
