@@ -1,6 +1,6 @@
 ﻿# meeting manager Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-03-31
+Auto-generated from all feature plans. Last updated: 2026-04-15
 
 ## Active Technologies
 - Python 3.12 + Streamlit 1.55, httpx (001-notion-onboarding)
@@ -10,6 +10,8 @@ Auto-generated from all feature plans. Last updated: 2026-03-31
 - 本地 JSON 檔案 (meeting_meta.json) (003-notion-account-history)
 - Python 3.12 + Streamlit 1.55, OpenAI SDK (003-notion-account-history)
 - 本地 JSON 檔案（`output/{date}_{name}/meeting_meta.json`） (003-notion-account-history)
+- Python 3.12 + Streamlit 1.55, OpenAI SDK（Whisper API） (004-retranscribe)
+- 本地檔案系統（`output/{date}_{name}/` 目錄，JSON + txt） (004-retranscribe)
 
 - Python 3.12 + Streamlit 1.55 + streamlit, openai, httpx (Notion API) (main)
 
@@ -30,9 +32,9 @@ cd src; pytest; ruff check .
 Python 3.12 + Streamlit 1.55: Follow standard conventions
 
 ## Recent Changes
+- 004-retranscribe: Added Python 3.12 + Streamlit 1.55, OpenAI SDK（Whisper API）
 - 003-notion-account-history: Added Python 3.12 + Streamlit 1.55, OpenAI SDK
 - 003-notion-account-history: Added Python 3.12 + Streamlit 1.55, httpx (notion_uploader)
-- 003-notion-account-history: Added Python 3.12 + Streamlit 1.55, httpx
 
 
 <!-- MANUAL ADDITIONS START -->
