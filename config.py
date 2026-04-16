@@ -22,6 +22,7 @@ NOTION_ACTIVE_FILE = BASE_DIR / ".notion_active_account"
 
 # Audio
 MAX_AUDIO_SIZE_MB = 25
+AUDIO_EXTENSIONS = {'.mp3', '.mp4', '.wav', '.m4a', '.ogg', '.webm', '.mpeg', '.mpga'}
 
 # Summary style
 SUMMARY_STYLE_FILE = BASE_DIR / "summary_style.md"

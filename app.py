@@ -27,7 +27,8 @@ def main():
                 'summary_draft', 'key_points', 'output_dir', 'page_url',
                 'step', 'meeting_name', 'date_str', 'tags', 'participants',
                 'replace_pairs_count', 'editor_version', 'summarizing', 'uploading',
-                'summary_version_idx', 'draft_base_version', 'notion_target_page', 'notion_target_db']:
+                'summary_version_idx', 'draft_base_version', 'notion_target_page', 'notion_target_db',
+                'audio_path']:
         if key not in st.session_state:
             st.session_state[key] = None
     if 'summary_versions' not in st.session_state:
@@ -45,6 +46,8 @@ def main():
         st.session_state.summarizing = False
     if st.session_state.uploading is None:
         st.session_state.uploading = False
+    if 'retranscribing' not in st.session_state:
+        st.session_state.retranscribing = False
     if 'summary_editor_ver' not in st.session_state:
         st.session_state.summary_editor_ver = 0
     if 'meta_tags_input' not in st.session_state:
@@ -260,6 +263,7 @@ def _resume_meeting(meeting_info):
     st.session_state.replace_pairs_count = 1
     st.session_state.summarizing = False
     st.session_state.uploading = False
+    st.session_state.retranscribing = False
 
     # 基本資訊
     st.session_state.output_dir = str(output_dir)
@@ -596,6 +600,7 @@ def _do_transcription(uploaded_file, meeting_name, date_str):
             (output_dir / "transcript_raw.txt").write_text(raw_transcript, encoding='utf-8')
 
         st.session_state.raw_transcript = raw_transcript
+        st.session_state.audio_path = str(audio_path)
         st.session_state.step = 1
         _save_meeting_meta(output_dir)
         status.update(label="✅ 轉錄完成，請審閱逐字稿", state="complete")
@@ -615,6 +620,80 @@ def _parse_comma_list(text: str) -> list[str]:
     return [item.strip() for item in text.split(',') if item.strip()] if text else []
 
 
+def _find_audio_path(output_dir) -> str | None:
+    """定位會議原始音檔。優先從 meeting_meta.json 讀取，fallback 掃描資料夾。"""
+    output_dir = Path(output_dir)
+
+    # 1. 嘗試從 meeting_meta.json 讀取
+    meta_path = output_dir / "meeting_meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding='utf-8'))
+            audio_path = meta.get("audio_path")
+            if audio_path and Path(audio_path).exists():
+                return audio_path
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 2. Fallback: 掃描 output 資料夾中的音檔
+    audio_files = [
+        f for f in output_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in config.AUDIO_EXTENSIONS
+    ]
+    if len(audio_files) == 1:
+        return str(audio_files[0])
+
+    return None
+
+
+def _do_retranscribe():
+    """執行重新轉錄：呼叫 Whisper API，成功後覆蓋 transcript_raw.txt。"""
+    from transcriber import transcribe
+
+    audio_path = st.session_state.audio_path
+    output_dir = Path(st.session_state.output_dir)
+
+    # --- Validation guards (T010) ---
+    if not audio_path or not Path(audio_path).exists():
+        st.error(f"❌ 找不到原始音檔：{audio_path}，無法重新轉錄")
+        st.session_state.retranscribing = False
+        return
+
+    if Path(audio_path).stat().st_size == 0:
+        st.error("❌ 音檔大小為 0，無法轉錄")
+        st.session_state.retranscribing = False
+        return
+
+    status = st.status("重新轉錄中...", expanded=True)
+
+    try:
+        file_size_mb = Path(audio_path).stat().st_size / (1024 * 1024)
+        status.write(f"📂 音檔：{Path(audio_path).name}（{file_size_mb:.1f} MB）")
+
+        result = transcribe(
+            audio_path,
+            progress_callback=lambda msg: status.write(f"⏳ {msg}")
+        )
+
+        new_transcript = result['raw_text']
+
+        # 成功後才覆蓋檔案（FR-007: 失敗時保留原稿）
+        (output_dir / "transcript_raw.txt").write_text(new_transcript, encoding='utf-8')
+        st.session_state.raw_transcript = new_transcript
+        st.session_state.editor_version += 1
+
+        status.update(label="✅ 重新轉錄完成", state="complete")
+        status.write(f"共 {len(new_transcript):,} 字")
+
+    except Exception as e:
+        status.update(label="❌ 重新轉錄失敗", state="error")
+        status.write(f"❌ {str(e)}")
+        logger.error("重新轉錄失敗 | %s: %s", type(e).__name__, str(e), exc_info=True)
+
+    finally:
+        st.session_state.retranscribing = False
+
+
 # ──────────────────────────────────────────────
 # Step 1.5: 審閱逐字稿 + 批次取代
 # ──────────────────────────────────────────────
@@ -632,7 +711,7 @@ def _show_transcript_review():
         del st.session_state['summarize_error']
 
     # Metadata 欄位（標籤 + 參與者）
-    is_busy_meta = st.session_state.summarizing or st.session_state.uploading
+    is_busy_meta = st.session_state.summarizing or st.session_state.uploading or st.session_state.retranscribing
     meta_col1, meta_col2 = st.columns(2)
     with meta_col1:
         st.text_input("🏷️ 標籤（逗號分隔）", key="meta_tags_input", disabled=is_busy_meta)
@@ -681,6 +760,26 @@ def _show_transcript_review():
                     st.toast("沒有找到符合的文字")
                 st.rerun()
 
+    # --- 重新轉錄 ---
+    audio_path = _find_audio_path(st.session_state.output_dir)
+    no_audio = audio_path is None
+    is_busy = st.session_state.summarizing or st.session_state.uploading or st.session_state.retranscribing
+
+    retranscribe_col, _ = st.columns([1, 3])
+    with retranscribe_col:
+        btn_label = "⏳ 重新轉錄中..." if st.session_state.retranscribing else "🔄 重新轉錄"
+        if st.button(btn_label, disabled=is_busy or no_audio):
+            st.session_state.retranscribing = True
+            st.session_state.audio_path = audio_path
+            st.rerun()
+    if no_audio:
+        st.caption("⚠️ 找不到原始音檔，無法重新轉錄")
+
+    # 重新轉錄執行（在 rerun cycle 中當 retranscribing=True 時觸發）
+    if st.session_state.retranscribing:
+        _do_retranscribe()
+        st.rerun()
+
     # --- 可編輯的逐字稿（key 帶版號，批次取代後版號+1 強制重建 widget）---
     editor_key = f"transcript_editor_v{st.session_state.editor_version}"
     edited_transcript = st.text_area(
@@ -692,7 +791,6 @@ def _show_transcript_review():
 
     # --- 確認 ---
     has_summary = st.session_state.summary is not None
-    is_busy = st.session_state.summarizing or st.session_state.uploading
     cols = st.columns([1, 1, 2]) if has_summary else st.columns([1, 3])
     with cols[0]:
         btn_label = "⏳ 摘要產生中..." if is_busy else "✅ 確認逐字稿，產生摘要"
@@ -726,7 +824,7 @@ def _show_transcript_review():
                 st.rerun()
 
     # 摘要產生中：按鈕已 disabled，在畫面底部才真正執行摘要
-    if is_busy:
+    if st.session_state.summarizing:
         _do_summarize()
         st.rerun()
 
@@ -1108,15 +1206,23 @@ def _save_meeting_meta(output_dir, uploaded_by=None):
     }
     if uploaded_by is not None:
         meta["uploaded_by"] = uploaded_by
-    # 保留既有的 uploaded_by（重新儲存草稿時不覆蓋）
+
+    # 保留 audio_path（從 session state 讀取）
+    if st.session_state.get("audio_path"):
+        meta["audio_path"] = st.session_state.audio_path
+
+    # 保留既有欄位（uploaded_by, audio_path）避免被覆蓋
     meta_path = output_dir / "meeting_meta.json"
-    if uploaded_by is None and meta_path.exists():
+    if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text(encoding='utf-8'))
-            if "uploaded_by" in existing:
+            if uploaded_by is None and "uploaded_by" in existing:
                 meta["uploaded_by"] = existing["uploaded_by"]
+            if "audio_path" not in meta and "audio_path" in existing:
+                meta["audio_path"] = existing["audio_path"]
         except (json.JSONDecodeError, KeyError):
             pass
+
     meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8'
     )

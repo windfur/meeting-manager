@@ -61,6 +61,7 @@ def _transcribe_file(client, model, file_path, max_retries=3):
                     model=model,
                     file=f,
                     response_format="verbose_json",
+                    prompt="這是一場會議的錄音，內容可能包含中文與英文。中文部分請使用繁體中文輸出。",
                 )
 
             segments = []
